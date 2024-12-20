@@ -75,8 +75,13 @@ struct Cli {
     #[arg(short = 'n', long = "account-number", default_value_t = 0)]
     account_number: u32,
 
-    #[arg(long = "rpc")]
-    rpc: Option<String>,
+    #[arg(
+        long = "pid",
+        default_value = "AAHT26ecV3FEeFmL2gDZW6FfEqjPkghHbAkNZGqwT8Ww" // Devnet: msigUdDBsR4zSUYqYEDrc1LcgtmuSDDM7KxpRUXNC6U
+    )]
+    pid: AnchorPubkey,
+    #[arg(long = "cluster", default_value_t = Cluster::Devnet)]
+    cluster: Cluster,
 
     #[arg(short = 'k', long = "private-key")]
     key_file: Option<String>,
@@ -145,20 +150,11 @@ fn build_tx(
 }
 
 async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> anyhow::Result<()> {
-    let cluster = if let Some(ref rpc) = cli.rpc {
-        rpc.parse()?
-    } else {
-        Cluster::Devnet
-    };
-    let client = Client::new_with_options(cluster, signer.clone(), CommitmentConfig::processed());
-
-    // Program IDs
-    let multisig_program_id =
-        // AnchorPubkey::from_str("AAHT26ecV3FEeFmL2gDZW6FfEqjPkghHbAkNZGqwT8Ww").unwrap(); // MAINNET
-        AnchorPubkey::from_str("msigUdDBsR4zSUYqYEDrc1LcgtmuSDDM7KxpRUXNC6U").unwrap(); // DEVNET
+    let client =
+        Client::new_with_options(cli.cluster, signer.clone(), CommitmentConfig::processed());
 
     // Program instance
-    let program = client.program(multisig_program_id)?;
+    let program = client.program(cli.pid)?;
 
     match cli.command {
         Command::CreateMultisig { signers, threshold } => {
@@ -166,8 +162,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             let accounts = multisig_accounts::CreateMultisig {
                 multisig: keypair.pubkey(),
             };
-            let (multisig_pda, nonce) =
-                derive_multisig_signer(&keypair.pubkey(), &multisig_program_id);
+            let (multisig_pda, nonce) = derive_multisig_signer(&keypair.pubkey(), &cli.pid);
             let instructions = multisig_instructions::CreateMultisig {
                 owners: signers,
                 threshold,
@@ -200,7 +195,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             amount,
         } => {
             let keypair = Keypair::new();
-            let (multisig_pda, _) = derive_multisig_signer(&multisig, &multisig_program_id);
+            let (multisig_pda, _) = derive_multisig_signer(&multisig, &cli.pid);
             let transfer = token_instruction::transfer(
                 &spl_token::id(),
                 &from.to_bytes().into(),
@@ -273,7 +268,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             from,
             to,
         } => {
-            let (multisig_pda, _) = derive_multisig_signer(&multisig, &multisig_program_id);
+            let (multisig_pda, _) = derive_multisig_signer(&multisig, &cli.pid);
             let accounts = multisig_accounts::ExecuteTransaction {
                 multisig: multisig.to_bytes().into(),
                 multisig_signer: multisig_pda.to_bytes().into(),
