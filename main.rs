@@ -8,7 +8,7 @@ use anchor_client::{
         signature::{Keypair, Signer},
         signer::{EncodableKey, SignerError},
         signers::Signers,
-        system_instruction,
+        system_instruction, sysvar,
         transaction::Transaction,
     },
     Client, Cluster,
@@ -24,8 +24,7 @@ use solana_remote_wallet::{
 };
 use solana_sdk::derivation_path::DerivationPath;
 use spl_token::instruction as token_instruction;
-use std::str::FromStr;
-use std::{ops::Deref, rc::Rc};
+use std::{ops::Deref, rc::Rc, str::FromStr};
 
 #[derive(Clone)]
 struct LedgerSigner {
@@ -168,9 +167,10 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                 threshold,
                 nonce,
             };
-            let sig = program
+            let req = program
                 .request()
                 .accounts(accounts)
+                .accounts(AccountMeta::new_readonly(sysvar::rent::id(), false))
                 .args(instructions)
                 .instruction(system_instruction::create_account(
                     &program.payer(),
@@ -178,10 +178,14 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                     program.rpc().get_minimum_balance_for_rent_exemption(500)?,
                     500,
                     &program.id(),
-                ))
-                .signer(&signer)
-                .signer(&keypair)
-                .send()
+                ));
+
+            let blockhash = program.rpc().get_latest_blockhash()?;
+            let signers: Vec<&dyn Signer> = vec![&signer, &keypair];
+            let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
+            let sig = program
+                .async_rpc()
+                .send_and_confirm_transaction(&tx)
                 .await?;
 
             println!("Transaction created: {}", sig);
@@ -220,6 +224,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             let req = program
                 .request()
                 .accounts(accounts)
+                .accounts(AccountMeta::new_readonly(sysvar::rent::id(), false))
                 .args(instructions)
                 .instruction(system_instruction::create_account(
                     &program.payer(),
@@ -230,7 +235,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                 ));
 
             let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer, &keypair, &signer];
+            let signers: Vec<&dyn Signer> = vec![&signer, &keypair];
             let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
             let sig = program
                 .async_rpc()
@@ -253,7 +258,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             let req = program.request().accounts(accounts).args(instructions);
 
             let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer, &signer];
+            let signers: Vec<&dyn Signer> = vec![&signer];
             let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
             let sig = program
                 .async_rpc()
@@ -288,7 +293,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                 .args(instructions);
 
             let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer, &signer];
+            let signers: Vec<&dyn Signer> = vec![&signer];
             let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
             let sig = program
                 .async_rpc()
