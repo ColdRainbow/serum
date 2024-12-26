@@ -5,75 +5,21 @@ use anchor_client::{
         instruction::Instruction,
         message::Message,
         pubkey::Pubkey as AnchorPubkey,
-        signature::{Keypair, Signer},
-        signer::{EncodableKey, SignerError},
-        signers::Signers,
+        signature::{Keypair, Signature, Signer},
         system_instruction, sysvar,
         transaction::Transaction,
     },
     Client, Cluster,
 };
 use base64::{engine::Engine, prelude::BASE64_STANDARD};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use coral_multisig::instruction as multisig_instructions;
 use coral_multisig::{accounts as multisig_accounts, TransactionAccount};
-use solana_remote_wallet::{
-    ledger::LedgerWallet,
-    locator::Manufacturer,
-    remote_wallet::{RemoteWallet, RemoteWalletError},
-};
-use solana_sdk::derivation_path::DerivationPath;
-use spl_token::instruction as token_instruction;
-use std::{ops::Deref, rc::Rc, str::FromStr};
-
-#[derive(Clone)]
-struct LedgerSigner {
-    ledger: Rc<LedgerWallet>,
-    derivation_path: DerivationPath,
-}
-
-impl Signer for LedgerSigner {
-    fn try_pubkey(&self) -> Result<AnchorPubkey, anchor_client::solana_sdk::signer::SignerError> {
-        Ok(self
-            .ledger
-            .get_pubkey(&self.derivation_path, false)
-            .map_err(ledger_to_signer_error)?
-            .to_bytes()
-            .into())
-    }
-
-    fn try_sign_message(
-        &self,
-        message: &[u8],
-    ) -> Result<
-        anchor_client::solana_sdk::signature::Signature,
-        anchor_client::solana_sdk::signer::SignerError,
-    > {
-        Ok(self
-            .ledger
-            .sign_message(&self.derivation_path, message)
-            .map_err(ledger_to_signer_error)?
-            .as_ref()
-            .try_into()
-            .unwrap())
-    }
-
-    fn is_interactive(&self) -> bool {
-        true
-    }
-}
-
-fn ledger_to_signer_error(e: RemoteWalletError) -> SignerError {
-    SignerError::Custom(e.to_string())
-}
+use crossterm::style::{style, Stylize};
+use spl_token::instruction::{self as token_instruction, TokenInstruction};
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long = "ledger", default_value_t = false)]
-    ledger: bool,
-    #[arg(short = 'n', long = "account-number", default_value_t = 0)]
-    account_number: u32,
-
     #[arg(
         long = "pid",
         default_value = "AAHT26ecV3FEeFmL2gDZW6FfEqjPkghHbAkNZGqwT8Ww" // Devnet: msigUdDBsR4zSUYqYEDrc1LcgtmuSDDM7KxpRUXNC6U
@@ -89,17 +35,32 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args)]
+struct SignerArg {
+    #[arg(long = "signer")]
+    signer: AnchorPubkey,
+    #[arg(long = "nonce-account")]
+    nonce_account: AnchorPubkey,
+    #[arg(long = "nonce")]
+    nonce: hash::Hash,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create new multisig
+    #[command(hide(true))]
     CreateMultisig {
+        #[command(flatten)]
+        signer: SignerArg,
         #[arg(long = "signers")]
         signers: Vec<AnchorPubkey>,
         #[arg(long = "threshold")]
         threshold: u64,
     },
     /// Create a token transfer transaction
-    CreateTransaction {
+    CreateTokenTransferTransaction {
+        #[command(flatten)]
+        signer: SignerArg,
         #[arg(long = "multisig")]
         multisig: AnchorPubkey,
         #[arg(long = "from")]
@@ -107,56 +68,66 @@ enum Command {
         #[arg(long = "to")]
         to: AnchorPubkey,
         #[arg(long = "amount")]
-        amount: u64,
+        amount: f64,
     },
     /// Approve a pending transaction
     Approve {
+        #[command(flatten)]
+        signer: SignerArg,
         #[arg(long = "multisig")]
         multisig: AnchorPubkey,
         #[arg(long = "transaction")]
         transaction: AnchorPubkey,
     },
     /// Execute an approved transaction
-    ExecuteTransaction {
+    ExecuteTokenTransferTransaction {
+        #[command(flatten)]
+        signer: SignerArg,
         #[arg(long = "multisig")]
         multisig: AnchorPubkey,
         #[arg(long = "transaction")]
         transaction: AnchorPubkey,
-        #[arg(long = "from")]
-        from: AnchorPubkey,
-        #[arg(long = "to")]
-        to: AnchorPubkey,
+    },
+    /// Submit a signed transaction
+    Submit {
+        #[arg(long = "transaction")]
+        transaction: String,
+        #[arg(long = "signatures")]
+        signatures: Vec<Signature>,
     },
 }
 
 fn build_tx(
-    signers: impl Signers,
-    blockhash: hash::Hash,
     payer: AnchorPubkey,
+    nonce: hash::Hash,
+    nonce_authority: AnchorPubkey,
     instructions: Vec<Instruction>,
-) -> Transaction {
-    let message = Message::new_with_blockhash(&instructions, Some(&payer), &blockhash);
-    println!("You may now check the transaction using external tools.\nHere is the transaction data in base64:\n{}",
+) -> anyhow::Result<Message> {
+    let mut message = Message::new_with_nonce(instructions, Some(&payer), &nonce_authority, &payer);
+    message.recent_blockhash = nonce;
+    println!("You may now check the transaction using external tools.\nHere is the transaction data in base64:\n\n{}\n",
         BASE64_STANDARD.encode(message.serialize())
     );
-    println!("Press enter, when you're finished");
 
-    let mut s = String::new();
-    std::io::stdin().read_line(&mut s).unwrap();
-
-    println!("Now the transaction must be signed");
-    Transaction::new_signed_with_payer(&instructions, Some(&payer), &signers, blockhash)
+    Ok(message)
 }
 
-async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let dummy_signer = Keypair::new();
     let client =
-        Client::new_with_options(cli.cluster, signer.clone(), CommitmentConfig::processed());
+        Client::new_with_options(cli.cluster, &dummy_signer, CommitmentConfig::processed());
 
     // Program instance
     let program = client.program(cli.pid)?;
 
     match cli.command {
-        Command::CreateMultisig { signers, threshold } => {
+        Command::CreateMultisig {
+            signer,
+            signers,
+            threshold,
+        } => {
             let keypair = Keypair::new();
             let accounts = multisig_accounts::CreateMultisig {
                 multisig: keypair.pubkey(),
@@ -173,31 +144,69 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                 .accounts(AccountMeta::new_readonly(sysvar::rent::id(), false))
                 .args(instructions)
                 .instruction(system_instruction::create_account(
-                    &program.payer(),
+                    &signer.signer,
                     &keypair.pubkey(),
                     program.rpc().get_minimum_balance_for_rent_exemption(500)?,
                     500,
                     &program.id(),
                 ));
 
-            let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer, &keypair];
-            let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
-            let sig = program
-                .async_rpc()
-                .send_and_confirm_transaction(&tx)
-                .await?;
+            let tx = build_tx(
+                signer.signer,
+                signer.nonce,
+                signer.nonce_account,
+                req.instructions()?,
+            )?;
+            let sig = keypair.sign_message(&tx.serialize());
 
-            println!("Transaction created: {}", sig);
+            println!("Transaction signed by multisig account: {}", sig);
             println!("Multisig address: {}", keypair.pubkey());
             println!("Multisig PDA: {}", multisig_pda);
         }
-        Command::CreateTransaction {
+        Command::CreateTokenTransferTransaction {
+            signer,
             multisig,
             from,
             to,
             amount,
         } => {
+            println!(
+                "{}",
+                "Preparing a token transfer transaction with the following parameters:".bold()
+            );
+            println!(
+                "Multisig address: {}\nFrom address: {}\nTo address: {}\nAmount: {}\n",
+                style(multisig).green(),
+                style(from).green(),
+                style(to).green(),
+                style(amount).green(),
+            );
+
+            let from_account = program
+                .async_rpc()
+                .get_token_account(&from)
+                .await?
+                .ok_or(anyhow::Error::msg("source token account not found"))?;
+            let to_account = program
+                .async_rpc()
+                .get_token_account(&to)
+                .await?
+                .ok_or(anyhow::Error::msg("destination token account not found"))?;
+            if from_account.mint != to_account.mint {
+                return Err(anyhow::Error::msg(
+                    "source and destination accounts have different mint addresses",
+                ));
+            }
+            if from_account.token_amount.ui_amount.is_none()
+                || from_account.token_amount.ui_amount.unwrap() < amount
+            {
+                return Err(anyhow::Error::msg(
+                    "source account doesn't have sufficient amount of token",
+                ));
+            }
+
+            let amount = spl_token::ui_amount_to_amount(amount, from_account.token_amount.decimals);
+
             let keypair = Keypair::new();
             let (multisig_pda, _) = derive_multisig_signer(&multisig, &cli.pid);
             let transfer = token_instruction::transfer(
@@ -214,7 +223,7 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
             let accounts = multisig_accounts::CreateTransaction {
                 multisig,
                 transaction: keypair.pubkey(),
-                proposer: signer.pubkey(),
+                proposer: signer.signer,
             };
             let instructions = multisig_instructions::CreateTransaction {
                 pid: spl_token::id().to_bytes().into(),
@@ -227,117 +236,135 @@ async fn run<S: Clone + Deref<Target = impl Signer>>(signer: S, cli: Cli) -> any
                 .accounts(AccountMeta::new_readonly(sysvar::rent::id(), false))
                 .args(instructions)
                 .instruction(system_instruction::create_account(
-                    &program.payer(),
+                    &signer.signer,
                     &keypair.pubkey(),
                     program.rpc().get_minimum_balance_for_rent_exemption(500)?,
                     500,
                     &program.id(),
                 ));
 
-            let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer, &keypair];
-            let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
-            let sig = program
-                .async_rpc()
-                .send_and_confirm_transaction(&tx)
-                .await?;
+            let tx = build_tx(
+                signer.signer,
+                signer.nonce,
+                signer.nonce_account,
+                req.instructions()?,
+            )?;
+            let sig = keypair.sign_message(&tx.serialize());
 
-            println!("Transaction created: {}", sig);
-            println!("Pending transaction account: {}", keypair.pubkey());
+            println!(
+                "Transaction signed by transaction account: {}",
+                style(sig).green()
+            );
+            println!(
+                "Pending transaction account: {}",
+                style(keypair.pubkey()).green()
+            );
         }
         Command::Approve {
+            signer,
             multisig,
             transaction,
         } => {
+            println!(
+                "{}",
+                "Approving a transaction with the following parameters:".bold()
+            );
+            println!(
+                "Multisig address: {}\nTransaction address: {}\n",
+                style(multisig).green(),
+                style(transaction).green(),
+            );
+
             let accounts = multisig_accounts::Approve {
                 multisig,
                 transaction,
-                owner: signer.pubkey(),
+                owner: signer.signer,
             };
             let instructions = multisig_instructions::Approve {};
             let req = program.request().accounts(accounts).args(instructions);
 
-            let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer];
-            let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
-            let sig = program
-                .async_rpc()
-                .send_and_confirm_transaction(&tx)
-                .await?;
-
-            println!("Transaction created: {}", sig);
+            build_tx(
+                signer.signer,
+                signer.nonce,
+                signer.nonce_account,
+                req.instructions()?,
+            )?;
         }
-        Command::ExecuteTransaction {
+        Command::ExecuteTokenTransferTransaction {
+            signer,
             multisig,
             transaction,
-            from,
-            to,
         } => {
+            let transaction_account: coral_multisig::Transaction =
+                program.account(transaction).await?;
             let (multisig_pda, _) = derive_multisig_signer(&multisig, &cli.pid);
+            let mut remaining_accounts: Vec<AccountMeta> = transaction_account
+                .accounts
+                .iter()
+                .map(Into::into)
+                .collect();
+            for acc in remaining_accounts.iter_mut() {
+                acc.is_signer = false;
+            }
+            let from_account = program
+                .async_rpc()
+                .get_token_account(&remaining_accounts[0].pubkey)
+                .await?
+                .ok_or(anyhow::Error::msg("source token account not found"))?;
+            let amount = match TokenInstruction::unpack(&transaction_account.data)? {
+                TokenInstruction::Transfer { amount } => Ok(amount),
+                _ => Err(anyhow::Error::msg(
+                    "transaction instruction is not transfer",
+                )),
+            }?;
+            let amount = spl_token::amount_to_ui_amount(amount, from_account.token_amount.decimals);
+            println!("Executing a token transfer transaction with the following parameters:");
+            println!(
+                "Multisig address: {}\nTransaction address: {}\nFrom: {}\nTo: {}\nAmount: {}\n",
+                style(multisig).green(),
+                style(transaction).green(),
+                style(remaining_accounts[0].pubkey).green(),
+                style(remaining_accounts[1].pubkey).green(),
+                style(amount).green(),
+            );
+
             let accounts = multisig_accounts::ExecuteTransaction {
-                multisig: multisig.to_bytes().into(),
-                multisig_signer: multisig_pda.to_bytes().into(),
-                transaction: transaction.to_bytes().into(),
+                multisig,
+                multisig_signer: multisig_pda,
+                transaction,
             };
             let instructions = multisig_instructions::ExecuteTransaction {};
             let req = program
                 .request()
                 .accounts(accounts)
-                .accounts(AccountMeta::new_readonly(
-                    multisig_pda.to_bytes().into(),
-                    false,
-                ))
-                .accounts(AccountMeta::new(from, false))
-                .accounts(AccountMeta::new(to.to_bytes().into(), false))
+                .accounts(remaining_accounts)
                 .accounts(AccountMeta::new(spl_token::id().to_bytes().into(), false))
                 .args(instructions);
 
-            let blockhash = program.rpc().get_latest_blockhash()?;
-            let signers: Vec<&dyn Signer> = vec![&signer];
-            let tx = build_tx(signers, blockhash, signer.pubkey(), req.instructions()?);
+            build_tx(
+                signer.signer,
+                signer.nonce,
+                signer.nonce_account,
+                req.instructions()?,
+            )?;
+        }
+        Command::Submit {
+            transaction,
+            signatures,
+        } => {
+            let data = BASE64_STANDARD.decode(transaction)?;
+            let message: Message = bincode::deserialize(&data)?;
+            let tx = Transaction {
+                signatures,
+                message,
+            };
             let sig = program
                 .async_rpc()
                 .send_and_confirm_transaction(&tx)
                 .await?;
-
-            println!("Transaction created: {}", sig);
+            println!("Transaction submitted: {}", style(sig).green());
         }
     }
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    if cli.ledger {
-        let wallet_manager = solana_remote_wallet::remote_wallet::initialize_wallet_manager()?;
-        wallet_manager.update_devices()?;
-        let ledger_info = wallet_manager
-            .list_devices()
-            .into_iter()
-            .find(|wi| matches!(wi.manufacturer, Manufacturer::Ledger))
-            .ok_or(anyhow::Error::msg("Ledger not found. Please, ensure that it is connected, unlocked, and the Solana app is opened"))?;
-        let ledger = wallet_manager.get_ledger(&ledger_info.host_device_path)?;
-        let signer = LedgerSigner {
-            ledger,
-            derivation_path: DerivationPath::new_bip44(Some(cli.account_number), None),
-        };
-        run(&signer, cli).await?;
-    } else {
-        run(
-            Rc::new(
-                Keypair::read_from_file(
-                    cli.key_file
-                        .clone()
-                        .ok_or(anyhow::Error::msg("private-key is required"))?,
-                )
-                .unwrap(),
-            ),
-            cli,
-        )
-        .await?;
-    };
     Ok(())
 }
 

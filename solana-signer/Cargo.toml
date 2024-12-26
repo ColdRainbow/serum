@@ -1,8 +1,5 @@
-[workspace]
-members = ["solana-signer"]
-
 [package]
-name = "serum-multisig-client"
+name = "solana-signer"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,11 +7,7 @@ edition = "2021"
 anchor-client = { version = "0.30.1", features = ["async"] }
 anyhow = "1.0.94"
 base64 = "0.22.1"
-bincode = "1.3.3"
 clap = { version = "4.5.23", features = ["derive"] }
-coral-multisig = { version = "0.9.0", path = "msig", features = ["no-entrypoint"] }
-crossterm = "0.28.1"
+solana-remote-wallet = "2.1.6"
 solana-sdk = "2.1.6"
-spl-associated-token-account-client = "2.0.0"
-spl-token = "7.0.0"
 tokio = { version = "1.42.0", features = ["macros"] }
