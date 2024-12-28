@@ -3,6 +3,7 @@ use std::rc::Rc;
 use anchor_client::Cluster;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use clap::Parser;
+use crossterm::style::{style, Stylize};
 use solana_remote_wallet::{
     ledger::LedgerWallet,
     locator::Manufacturer,
@@ -72,7 +73,7 @@ fn ledger_to_signer_error(e: RemoteWalletError) -> SignerError {
 fn run(signer: impl Signer, cli: Cli) -> anyhow::Result<()> {
     let message = BASE64_STANDARD.decode(cli.transaction)?;
     let sig = signer.sign_message(&message);
-    println!("Message signed:\n{}", sig);
+    println!("Message signed: {}", style(sig).green());
     Ok(())
 }
 
