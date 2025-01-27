@@ -20,8 +20,8 @@ use solana_sdk::{
 struct Cli {
     #[arg(long = "ledger", default_value_t = false)]
     ledger: bool,
-    #[arg(short = 'n', long = "account-number", default_value_t = 0)]
-    account_number: u32,
+    #[arg(short = 'n', long = "account-number")]
+    account_number: Option<u32>,
 
     #[arg(long = "cluster", default_value_t = Cluster::Devnet)]
     cluster: Cluster,
@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         let ledger = wallet_manager.get_ledger(&ledger_info.host_device_path)?;
         let signer = LedgerSigner {
             ledger,
-            derivation_path: DerivationPath::new_bip44(Some(cli.account_number), None),
+            derivation_path: DerivationPath::new_bip44(cli.account_number, None),
         };
         run(signer, cli)?;
     } else {
